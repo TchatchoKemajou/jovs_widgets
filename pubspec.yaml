@@ -12,8 +12,10 @@ dependencies:
     sdk: flutter
   easy_localization: ^3.0.8
   flutter_map: ^7.0.2
-  geolocator: ^12.0.0
+  # Accept both 12 and 13 — host apps resolve to their already-pinned version.
+  geolocator: ">=12.0.0 <14.0.0"
   http: ^1.2.2
+  intl: ">=0.19.0 <0.21.0"
   latlong2: ^0.9.1
 
 dev_dependencies:

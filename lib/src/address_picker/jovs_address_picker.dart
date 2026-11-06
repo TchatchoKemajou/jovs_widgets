@@ -44,6 +44,7 @@ class JovsAddressPicker extends StatefulWidget {
     this.onChanged,
     this.onConfirm,
     this.locale,
+    this.biasCountry,
     this.showConfirmButton = true,
     this.height = 420,
   });
@@ -66,6 +67,12 @@ class JovsAddressPicker extends StatefulWidget {
   /// app's EasyLocalization locale.
   final String? locale;
 
+  /// ISO-3166 alpha-2 (ex: "CA", "FR", "CM"). Biaise fortement la recherche
+  /// Nominatim vers ce pays. Sans ça, taper "Lévis" peut remonter des
+  /// résultats en Belgique ou en France au lieu du Québec. Le host app
+  /// doit passer le pays détecté par `JovsGeoClient.detect()`.
+  final String? biasCountry;
+
   final bool showConfirmButton;
 
   final double height;
@@ -81,8 +88,8 @@ class _JovsAddressPickerState extends State<JovsAddressPicker> {
   final NominatimClient _nominatim = NominatimClient();
 
   late TextEditingController _searchCtrl;
+  late TextEditingController _streetCtrl;
   late TextEditingController _cityCtrl;
-  late TextEditingController _neighborhoodCtrl;
   late TextEditingController _landmarkCtrl;
 
   LatLng _pin = _montreal;
@@ -97,8 +104,8 @@ class _JovsAddressPickerState extends State<JovsAddressPicker> {
     super.initState();
     _searchCtrl = TextEditingController();
     final init = widget.initial;
+    _streetCtrl = TextEditingController(text: init?.street ?? '');
     _cityCtrl = TextEditingController(text: init?.city ?? '');
-    _neighborhoodCtrl = TextEditingController(text: init?.neighborhood ?? '');
     _landmarkCtrl = TextEditingController(text: init?.landmark ?? '');
     _pin = init != null
         ? LatLng(init.latitude, init.longitude)
@@ -115,8 +122,8 @@ class _JovsAddressPickerState extends State<JovsAddressPicker> {
   void dispose() {
     _searchDebounce?.cancel();
     _searchCtrl.dispose();
+    _streetCtrl.dispose();
     _cityCtrl.dispose();
-    _neighborhoodCtrl.dispose();
     _landmarkCtrl.dispose();
     _nominatim.dispose();
     super.dispose();
@@ -125,6 +132,37 @@ class _JovsAddressPickerState extends State<JovsAddressPicker> {
   String get _acceptLanguage {
     final l = widget.locale ?? context.locale.toString();
     return l;
+  }
+
+  /// Pays pertinent pour les libellés : priorité à ce que le reverse a
+  /// retourné (plus précis — l'utilisateur est peut-être en voyage) puis
+  /// au biais de recherche, sinon rien (labels neutres).
+  String? get _countryForLabels {
+    final c = _current?.countryCode ?? widget.biasCountry;
+    return c?.toUpperCase();
+  }
+
+  /// Un seul champ unifié qui s'adapte au pays : au Cameroun le user
+  /// saisit un carrefour ou un quartier (pas de rue formelle) ; en France
+  /// une rue + numéro ; au Canada une adresse civique ; ailleurs une
+  /// description libre. Le "Quartier" séparé a été retiré — il est
+  /// intégré ici pour les pays qui en ont besoin.
+  String get _streetLabel {
+    switch (_countryForLabels) {
+      case 'CA': return 'address_picker.street_ca'.tr();
+      case 'FR': return 'address_picker.street_fr'.tr();
+      case 'CM': return 'address_picker.street_cm'.tr();
+      default:   return 'address_picker.street'.tr();
+    }
+  }
+
+  String get _streetHint {
+    switch (_countryForLabels) {
+      case 'CA': return 'address_picker.street_hint_ca'.tr();
+      case 'FR': return 'address_picker.street_hint_fr'.tr();
+      case 'CM': return 'address_picker.street_hint_cm'.tr();
+      default:   return 'address_picker.street_hint'.tr();
+    }
   }
 
   void _emit() {
@@ -136,8 +174,10 @@ class _JovsAddressPickerState extends State<JovsAddressPicker> {
     final c = _current;
     if (c == null) return;
     _current = c.copyWith(
+      street: _streetCtrl.text.trim().isEmpty ? null : _streetCtrl.text.trim(),
       city: _cityCtrl.text.trim().isEmpty ? null : _cityCtrl.text.trim(),
-      neighborhood: _neighborhoodCtrl.text.trim().isEmpty ? null : _neighborhoodCtrl.text.trim(),
+      // neighborhood : préservé tel qu'il vient du reverse geocode (si
+      // Nominatim l'a rendu), mais plus modifiable par l'utilisateur.
       landmark: _landmarkCtrl.text.trim().isEmpty ? null : _landmarkCtrl.text.trim(),
     );
     _emit();
@@ -159,8 +199,13 @@ class _JovsAddressPickerState extends State<JovsAddressPicker> {
             ? null
             : _landmarkCtrl.text.trim();
         _current = result.copyWith(landmark: preservedLandmark);
+        // Fallback intelligent pour le champ "Adresse / Rue / Quartier" :
+        // dans les pays sans adressage formel (Cameroun, parts d'Afrique),
+        // Nominatim retourne rarement un `road` mais presque toujours un
+        // `suburb`/`neighbourhood`. On remonte ce dernier dans le champ
+        // principal pour que l'utilisateur voie "Bastos" plutôt que vide.
+        _streetCtrl.text = result.street ?? result.neighborhood ?? '';
         _cityCtrl.text = result.city ?? '';
-        _neighborhoodCtrl.text = result.neighborhood ?? '';
       } else {
         // Keep the pin but let the user fill the form manually.
         _current = (_current ??
@@ -211,7 +256,11 @@ class _JovsAddressPickerState extends State<JovsAddressPicker> {
       return;
     }
     _searchDebounce = Timer(const Duration(milliseconds: 500), () async {
-      final results = await _nominatim.search(text, acceptLanguage: _acceptLanguage);
+      final results = await _nominatim.search(
+        text,
+        acceptLanguage: _acceptLanguage,
+        countryCode: widget.biasCountry,
+      );
       if (!mounted) return;
       setState(() {
         _suggestions = results;
@@ -408,6 +457,17 @@ class _JovsAddressPickerState extends State<JovsAddressPicker> {
           ),
           const SizedBox(height: 10),
           TextField(
+            controller: _streetCtrl,
+            onChanged: (_) => _onFieldChanged(),
+            decoration: InputDecoration(
+              labelText: _streetLabel,
+              hintText: _streetHint,
+              isDense: true,
+              border: const OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 8),
+          TextField(
             controller: _cityCtrl,
             onChanged: (_) => _onFieldChanged(),
             decoration: InputDecoration(
@@ -416,16 +476,11 @@ class _JovsAddressPickerState extends State<JovsAddressPicker> {
               border: const OutlineInputBorder(),
             ),
           ),
-          const SizedBox(height: 8),
-          TextField(
-            controller: _neighborhoodCtrl,
-            onChanged: (_) => _onFieldChanged(),
-            decoration: InputDecoration(
-              labelText: 'address_picker.neighborhood'.tr(),
-              isDense: true,
-              border: const OutlineInputBorder(),
-            ),
-          ),
+          // "Quartier" retiré : au Canada on n'utilise jamais ce terme,
+          // au Cameroun le quartier se met directement dans "Adresse ou
+          // lieu-dit" (ex: Bastos, Carrefour Yassa). Le backend garde le
+          // champ neighborhood nullable — s'il arrive par reverse, on le
+          // conserve dans _current mais on ne le demande pas au user.
           const SizedBox(height: 8),
           TextField(
             controller: _landmarkCtrl,

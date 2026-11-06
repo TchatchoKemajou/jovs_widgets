@@ -29,21 +29,32 @@ class NominatimClient {
       };
 
   /// Full-text search. Returns up to [limit] candidates.
+  ///
+  /// [countryCode] (ISO-3166 alpha-2) biaise fortement les résultats vers
+  /// ce pays. Sans ça, Nominatim peut rendre des adresses en Belgique quand
+  /// on cherche un quartier québécois homonyme. Le picker passe le pays
+  /// détecté par geo-IP pour que la recherche reste précise localement.
   Future<List<NominatimPlace>> search(
     String query, {
     String? acceptLanguage,
+    String? countryCode,
     int limit = 5,
     Duration timeout = const Duration(seconds: 6),
   }) async {
     if (query.trim().length < 3) return const [];
+    final params = <String, String>{
+      'q': query,
+      'format': 'jsonv2',
+      'addressdetails': '1',
+      'limit': '$limit',
+    };
+    final cc = countryCode?.trim().toLowerCase();
+    if (cc != null && cc.length == 2) {
+      params['countrycodes'] = cc;
+    }
     final uri = Uri.parse(_base).replace(
       path: '/search',
-      queryParameters: {
-        'q': query,
-        'format': 'jsonv2',
-        'addressdetails': '1',
-        'limit': '$limit',
-      },
+      queryParameters: params,
     );
     try {
       final res = await _http.get(uri, headers: _headers(acceptLanguage)).timeout(timeout);
@@ -69,7 +80,10 @@ class NominatimClient {
         'lon': '${point.longitude}',
         'format': 'jsonv2',
         'addressdetails': '1',
-        'zoom': '16',
+        // zoom 18 = niveau bâtiment. En 16 Nominatim retourne la rue mais
+        // rarement le house_number ; l'utilisateur voit "Rue Létourneau"
+        // au lieu de "36B rue Létourneau" et pense que le reverse rate.
+        'zoom': '18',
       },
     );
     try {

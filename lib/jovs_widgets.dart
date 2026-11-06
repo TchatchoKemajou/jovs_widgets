@@ -9,3 +9,4 @@ library jovs_widgets;
 export 'src/address_picker/jovs_address.dart';
 export 'src/address_picker/jovs_address_picker.dart';
 export 'src/money/money.dart';
+export 'src/phone/jovs_phone_field.dart';

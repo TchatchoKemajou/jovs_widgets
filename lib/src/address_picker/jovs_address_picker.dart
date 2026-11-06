@@ -90,6 +90,7 @@ class _JovsAddressPickerState extends State<JovsAddressPicker> {
   bool _loadingReverse = false;
   Timer? _searchDebounce;
   List<NominatimPlace> _suggestions = const [];
+  bool _searchReturnedEmpty = false;
 
   @override
   void initState() {
@@ -202,16 +203,33 @@ class _JovsAddressPickerState extends State<JovsAddressPicker> {
 
   void _onSearchChanged(String text) {
     _searchDebounce?.cancel();
+    if (text.trim().length < 3) {
+      setState(() {
+        _suggestions = const [];
+        _searchReturnedEmpty = false;
+      });
+      return;
+    }
     _searchDebounce = Timer(const Duration(milliseconds: 500), () async {
       final results = await _nominatim.search(text, acceptLanguage: _acceptLanguage);
       if (!mounted) return;
-      setState(() => _suggestions = results);
+      setState(() {
+        _suggestions = results;
+        // Flag : la recherche a rendu zéro résultat. Permet d'afficher
+        // "aucune adresse trouvée" au lieu de laisser le pin filer sur la
+        // carte sans aucun feedback (incident 2026-11-06, Lévis mal
+        // reconnu → l'utilisateur pense que Nominatim a validé Montréal).
+        _searchReturnedEmpty = results.isEmpty;
+      });
     });
   }
 
   Future<void> _pickSuggestion(NominatimPlace p) async {
     _searchCtrl.text = p.displayName;
-    setState(() => _suggestions = const []);
+    setState(() {
+      _suggestions = const [];
+      _searchReturnedEmpty = false;
+    });
     await _movePinAndReverse(p.latLng);
   }
 
@@ -269,6 +287,25 @@ class _JovsAddressPickerState extends State<JovsAddressPicker> {
                           onTap: () => _pickSuggestion(s),
                         ))
                     .toList(),
+              ),
+            ),
+          )
+        else if (_searchReturnedEmpty)
+          Positioned(
+            top: 56,
+            left: 0,
+            right: 0,
+            child: Material(
+              elevation: 4,
+              borderRadius: BorderRadius.circular(10),
+              child: Padding(
+                padding: const EdgeInsets.all(14),
+                child: Text(
+                  'address_picker.no_results'.tr(),
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.onSurface.withOpacity(0.65),
+                  ),
+                ),
               ),
             ),
           ),

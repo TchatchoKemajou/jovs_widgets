@@ -89,6 +89,10 @@ class JovsPhoneField extends StatelessWidget {
       disableLengthCheck: !validate,
       invalidNumberMessage: 'Numéro invalide',
       decoration: decoration0,
+      // Padding à gauche du drapeau (sinon il colle au bord du champ et
+      // dénote visuellement par rapport aux autres TextFormField qui ont
+      // leur prefixIcon aéré — Franck 2026-11-08).
+      flagsButtonPadding: const EdgeInsets.symmetric(horizontal: 12),
       onChanged: (PhoneNumber n) {
         onChanged?.call(n.completeNumber);
       },

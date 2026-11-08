@@ -302,7 +302,12 @@ class _JovsAddressPickerState extends State<JovsAddressPicker> {
   }
 
   Widget _buildSearchBar(ThemeData theme) {
-    return Stack(
+    // Rendu en Column : les suggestions se placent SOUS le champ et
+    // poussent le reste vers le bas. Dans un Stack avec Positioned,
+    // elles sortaient de la zone de hit testing et devenaient
+    // inaccessibles au tap (incident 2026-11-06).
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         TextField(
           controller: _searchCtrl,
@@ -318,12 +323,10 @@ class _JovsAddressPickerState extends State<JovsAddressPicker> {
           ),
         ),
         if (_suggestions.isNotEmpty)
-          Positioned(
-            top: 56,
-            left: 0,
-            right: 0,
+          Padding(
+            padding: const EdgeInsets.only(top: 4),
             child: Material(
-              elevation: 4,
+              elevation: 2,
               borderRadius: BorderRadius.circular(10),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
@@ -340,12 +343,10 @@ class _JovsAddressPickerState extends State<JovsAddressPicker> {
             ),
           )
         else if (_searchReturnedEmpty)
-          Positioned(
-            top: 56,
-            left: 0,
-            right: 0,
+          Padding(
+            padding: const EdgeInsets.only(top: 4),
             child: Material(
-              elevation: 4,
+              elevation: 2,
               borderRadius: BorderRadius.circular(10),
               child: Padding(
                 padding: const EdgeInsets.all(14),

@@ -18,6 +18,11 @@ dependencies:
   intl: ">=0.19.0 <0.21.0"
   intl_phone_field: ^3.2.0
   latlong2: ^0.9.1
+  # Package publié par Franck sur pub.dev il y a 3 ans, cloné localement
+  # pour itérer sans friction. À republier sur pub.dev plus tard (voir
+  # a-faire-plus-tard.md). Dataset mondial : 246 pays, ~48k villes.
+  custom_country_state_city:
+    path: ../custom_country_state_city
 
 dev_dependencies:
   flutter_lints: ^4.0.0

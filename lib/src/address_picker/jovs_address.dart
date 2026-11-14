@@ -14,10 +14,11 @@
 ///   features that may later want extra fields (county, state, …).
 class JovsAddress {
   const JovsAddress({
-    required this.latitude,
-    required this.longitude,
+    this.latitude,
+    this.longitude,
     this.countryCode,
     this.country,
+    this.province,
     this.city,
     this.neighborhood,
     this.street,
@@ -26,10 +27,14 @@ class JovsAddress {
     this.raw,
   });
 
-  final double latitude;
-  final double longitude;
+  // lat/lng devenus optionnels : le user peut saisir une adresse manuelle
+  // sans GPS (village sans couverture Nominatim, refus permission). Backend
+  // tolère null — on géocodera en batch plus tard si besoin.
+  final double? latitude;
+  final double? longitude;
   final String? countryCode;
   final String? country;
+  final String? province;
   final String? city;
   final String? neighborhood;
   final String? street;
@@ -42,6 +47,7 @@ class JovsAddress {
     double? longitude,
     String? countryCode,
     String? country,
+    String? province,
     String? city,
     String? neighborhood,
     String? street,
@@ -54,6 +60,7 @@ class JovsAddress {
       longitude: longitude ?? this.longitude,
       countryCode: countryCode ?? this.countryCode,
       country: country ?? this.country,
+      province: province ?? this.province,
       city: city ?? this.city,
       neighborhood: neighborhood ?? this.neighborhood,
       street: street ?? this.street,
@@ -68,6 +75,7 @@ class JovsAddress {
         'longitude': longitude,
         'countryCode': countryCode,
         'country': country,
+        'province': province,
         'city': city,
         'neighborhood': neighborhood,
         'address': street,

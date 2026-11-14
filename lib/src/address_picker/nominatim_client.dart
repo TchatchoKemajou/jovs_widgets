@@ -125,11 +125,20 @@ class NominatimClient {
           ? '$houseNumber $road'
           : road;
     }();
+    // Province/région : Nominatim rend `state` pour QC, Littoral, etc.
+    // On stocke tel quel, le picker se chargera de matcher contre la liste
+    // du package custom_country_state_city.
+    final province = _firstNonEmpty([
+      addr['state'],
+      addr['region'],
+      addr['province'],
+    ]);
     return JovsAddress(
       latitude: point.latitude,
       longitude: point.longitude,
       countryCode: (addr['country_code'] as String?)?.toUpperCase(),
       country: addr['country'] as String?,
+      province: province,
       city: city,
       neighborhood: neighborhood,
       street: street,

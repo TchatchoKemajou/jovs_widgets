@@ -1,8 +1,10 @@
 import 'dart:async';
+import 'dart:convert';
 
+import 'package:custom_country_state_city/custom_country_state_city.dart';
 import 'package:easy_localization/easy_localization.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_map/flutter_map.dart';
+import 'package:flutter/services.dart' show rootBundle;
 import 'package:geolocator/geolocator.dart';
 import 'package:latlong2/latlong.dart';
 
@@ -11,90 +13,91 @@ import 'nominatim_client.dart';
 
 /// Universal address picker for Jov's apps.
 ///
-/// Combines three complementary inputs so the same screen works in Montreal,
-/// Paris, Yaoundé or on a remote village with no mailbox address:
+/// Refactor 2026-11-14 (Franck) : carte retirée, remplacée par dropdowns
+/// stricts Pays / Région / Ville via le package `custom_country_state_city`.
+/// Nominatim reste pour l'autocomplete et le reverse geocode. GPS en bouton
+/// visible dès l'ouverture. Flow :
 ///
-/// 1. A search box at the top (Nominatim/OSM autocomplete, debounced).
-/// 2. A full-screen embeddable Leaflet/OSM map with a pin at the current
-///    guess. Tapping the map moves the pin.
-/// 3. Four editable fields below the map: country (read-only once chosen),
-///    city, neighborhood and a free-form landmark. The city is mandatory, the
-///    rest is nullable — enough structure for every pilot country.
+/// 1. Au mount, le pays est préremplis via [initialCountryCode] (déduit par
+///    l'app depuis l'indicatif +XXX du phone du user — le pays est toujours
+///    connu puisqu'on exige phone à l'inscription).
+/// 2. Bouton « Détecter ma position » déclenche GPS → reverse Nominatim →
+///    pré-remplit les 3 dropdowns + rue + lat/lng.
+/// 3. Recherche libre (Nominatim) → sélection → même traitement.
+/// 4. Saisie 100 % manuelle via les 3 dropdowns est toujours possible.
 ///
-/// The widget never blocks on network: if Nominatim is slow or down the user
-/// can still type everything manually.
-///
-/// Translation keys used (all fall back to English hard-coded strings if the
-/// host app doesn't provide them):
+/// Translation keys used (fallback hard-codés si non fournis) :
 ///   address_picker.search_hint
 ///   address_picker.use_my_location
-///   address_picker.country
-///   address_picker.city
-///   address_picker.neighborhood
-///   address_picker.landmark
-///   address_picker.landmark_hint
+///   address_picker.country / state / city
+///   address_picker.street / street_hint (+ variantes _ca/_fr/_cm)
+///   address_picker.landmark / landmark_hint
 ///   address_picker.confirm
 ///   address_picker.permission_denied
-///   address_picker.osm_attribution
+///   address_picker.no_results
+///   address_picker.manual_hint
 class JovsAddressPicker extends StatefulWidget {
   const JovsAddressPicker({
     super.key,
     this.initial,
-    this.initialCenter,
     this.onChanged,
     this.onConfirm,
     this.locale,
-    this.biasCountry,
+    this.initialCountryCode,
     this.showConfirmButton = true,
-    this.height = 420,
-  });
+    @Deprecated('Carte retirée 2026-11-14 — paramètre no-op, à supprimer')
+    this.initialCenter,
+    @Deprecated('Remplacé par initialCountryCode — même sémantique')
+    String? biasCountry,
+    @Deprecated('Carte retirée 2026-11-14 — paramètre no-op, à supprimer')
+    double? height,
+  }) : _legacyBiasCountry = biasCountry;
 
-  /// If the caller already has an address (edit mode), start the pin there.
+  /// If the caller already has an address (edit mode), start the form there.
   final JovsAddress? initial;
 
-  /// Fallback center when no GPS permission and no [initial]. Montréal.
-  final LatLng? initialCenter;
-
-  /// Called whenever the pin moves or a field is edited.
+  /// Called whenever a field changes.
   final ValueChanged<JovsAddress>? onChanged;
 
-  /// Optional confirmation button handler (fired by the built-in Confirm
-  /// button — hide it by setting [showConfirmButton] to false).
+  /// Optional confirmation button handler (hide it with [showConfirmButton]).
   final ValueChanged<JovsAddress>? onConfirm;
 
-  /// Locale passed to Nominatim via Accept-Language so results come back in
-  /// the right language where OSM has translations. Defaults to the host
-  /// app's EasyLocalization locale.
+  /// Locale passed to Nominatim via Accept-Language.
   final String? locale;
 
-  /// ISO-3166 alpha-2 (ex: "CA", "FR", "CM"). Biaise fortement la recherche
-  /// Nominatim vers ce pays. Sans ça, taper "Lévis" peut remonter des
-  /// résultats en Belgique ou en France au lieu du Québec. Le host app
-  /// doit passer le pays détecté par `JovsGeoClient.detect()`.
-  final String? biasCountry;
+  /// ISO-3166 alpha-2 (`CA`, `FR`, `CM`). Pré-remplit le dropdown pays au
+  /// mount (host app passe le pays déduit de l'indicatif phone). Biaise
+  /// aussi la recherche Nominatim.
+  final String? initialCountryCode;
 
   final bool showConfirmButton;
 
-  final double height;
+  /// @deprecated no-op depuis le retrait de la carte (2026-11-14).
+  final dynamic initialCenter;
+
+  final String? _legacyBiasCountry;
+
+  /// Lit `initialCountryCode` et fallback sur l'ancien `biasCountry`.
+  String? get _effectiveCountryCode =>
+      initialCountryCode ?? _legacyBiasCountry;
 
   @override
   State<JovsAddressPicker> createState() => _JovsAddressPickerState();
 }
 
 class _JovsAddressPickerState extends State<JovsAddressPicker> {
-  static const LatLng _montreal = LatLng(45.5017, -73.5673);
-
-  final MapController _mapController = MapController();
   final NominatimClient _nominatim = NominatimClient();
 
   late TextEditingController _searchCtrl;
   late TextEditingController _streetCtrl;
-  late TextEditingController _cityCtrl;
   late TextEditingController _landmarkCtrl;
+  // Controllers pour le picker du package (textes affichés à l'écran).
+  late TextEditingController _countryCtrl;
+  late TextEditingController _stateCtrl;
+  late TextEditingController _cityCtrl;
 
-  LatLng _pin = _montreal;
   JovsAddress? _current;
-  bool _loadingReverse = false;
+  bool _loadingGps = false;
   Timer? _searchDebounce;
   List<NominatimPlace> _suggestions = const [];
   bool _searchReturnedEmpty = false;
@@ -102,19 +105,49 @@ class _JovsAddressPickerState extends State<JovsAddressPicker> {
   @override
   void initState() {
     super.initState();
-    _searchCtrl = TextEditingController();
     final init = widget.initial;
+    _searchCtrl = TextEditingController();
     _streetCtrl = TextEditingController(text: init?.street ?? '');
-    _cityCtrl = TextEditingController(text: init?.city ?? '');
     _landmarkCtrl = TextEditingController(text: init?.landmark ?? '');
-    _pin = init != null
-        ? LatLng(init.latitude, init.longitude)
-        : (widget.initialCenter ?? _montreal);
-    _current = init;
-    // Center the map on first frame once the widget is mounted.
-    WidgetsBinding.instance.addPostFrameCallback((_) => _mapController.move(_pin, 13));
-    if (init == null) {
-      _tryUseCurrentLocation(silent: true);
+    _countryCtrl = TextEditingController(text: init?.country ?? '');
+    _stateCtrl = TextEditingController(text: init?.province ?? '');
+    _cityCtrl = TextEditingController(text: init?.city ?? '');
+    _current = init ??
+        JovsAddress(countryCode: widget._effectiveCountryCode?.toUpperCase());
+    // Préremplit le nom du pays dans le dropdown si on a juste un code ISO
+    // (host app passe +237 → "CM"). On lit le JSON de pays du package pour
+    // retrouver "Cameroun" / "Cameroon" selon la locale.
+    if (init?.country == null && widget._effectiveCountryCode != null) {
+      _prefillCountryName(widget._effectiveCountryCode!);
+    }
+  }
+
+  Future<void> _prefillCountryName(String isoCode) async {
+    try {
+      final locale = (widget.locale ?? 'en').toLowerCase();
+      final lang = locale.startsWith('fr') ? 'fr' : 'en';
+      final json = await rootBundle.loadString(
+        'packages/custom_country_state_city/assets/$lang/country.json',
+      );
+      final list = jsonDecode(json) as List;
+      final match = list.cast<Map<String, dynamic>>().firstWhere(
+            (c) =>
+                (c['sortname'] as String?)?.toUpperCase() ==
+                isoCode.toUpperCase(),
+            orElse: () => const {},
+          );
+      final name = match['name'] as String?;
+      if (name != null && name.isNotEmpty && mounted) {
+        setState(() {
+          _countryCtrl.text = name;
+          _current = (_current ?? const JovsAddress()).copyWith(
+            countryCode: isoCode.toUpperCase(),
+            country: name,
+          );
+        });
+      }
+    } catch (_) {
+      // Pas grave si on n'arrive pas à préremplir — user choisira.
     }
   }
 
@@ -123,45 +156,49 @@ class _JovsAddressPickerState extends State<JovsAddressPicker> {
     _searchDebounce?.cancel();
     _searchCtrl.dispose();
     _streetCtrl.dispose();
-    _cityCtrl.dispose();
     _landmarkCtrl.dispose();
+    _countryCtrl.dispose();
+    _stateCtrl.dispose();
+    _cityCtrl.dispose();
     _nominatim.dispose();
     super.dispose();
   }
 
   String get _acceptLanguage {
-    final l = widget.locale ?? context.locale.toString();
-    return l;
+    return widget.locale ?? context.locale.toString();
   }
 
-  /// Pays pertinent pour les libellés : priorité à ce que le reverse a
-  /// retourné (plus précis — l'utilisateur est peut-être en voyage) puis
-  /// au biais de recherche, sinon rien (labels neutres).
-  String? get _countryForLabels {
-    final c = _current?.countryCode ?? widget.biasCountry;
-    return c?.toUpperCase();
+  String? get _activeCountryCode {
+    return (_current?.countryCode ?? widget._effectiveCountryCode)
+        ?.toUpperCase();
   }
 
-  /// Un seul champ unifié qui s'adapte au pays : au Cameroun le user
-  /// saisit un carrefour ou un quartier (pas de rue formelle) ; en France
-  /// une rue + numéro ; au Canada une adresse civique ; ailleurs une
-  /// description libre. Le "Quartier" séparé a été retiré — il est
-  /// intégré ici pour les pays qui en ont besoin.
+  /// Un champ rue adaptatif au pays (CA/FR/CM ont des conventions très
+  /// différentes — rue+numéro vs carrefour vs quartier). Si le pays n'est
+  /// pas encore sélectionné, libellé générique.
   String get _streetLabel {
-    switch (_countryForLabels) {
-      case 'CA': return 'address_picker.street_ca'.tr();
-      case 'FR': return 'address_picker.street_fr'.tr();
-      case 'CM': return 'address_picker.street_cm'.tr();
-      default:   return 'address_picker.street'.tr();
+    switch (_activeCountryCode) {
+      case 'CA':
+        return 'address_picker.street_ca'.tr();
+      case 'FR':
+        return 'address_picker.street_fr'.tr();
+      case 'CM':
+        return 'address_picker.street_cm'.tr();
+      default:
+        return 'address_picker.street'.tr();
     }
   }
 
   String get _streetHint {
-    switch (_countryForLabels) {
-      case 'CA': return 'address_picker.street_hint_ca'.tr();
-      case 'FR': return 'address_picker.street_hint_fr'.tr();
-      case 'CM': return 'address_picker.street_hint_cm'.tr();
-      default:   return 'address_picker.street_hint'.tr();
+    switch (_activeCountryCode) {
+      case 'CA':
+        return 'address_picker.street_hint_ca'.tr();
+      case 'FR':
+        return 'address_picker.street_hint_fr'.tr();
+      case 'CM':
+        return 'address_picker.street_hint_cm'.tr();
+      default:
+        return 'address_picker.street_hint'.tr();
     }
   }
 
@@ -170,53 +207,40 @@ class _JovsAddressPickerState extends State<JovsAddressPicker> {
     widget.onChanged?.call(_current!);
   }
 
-  void _onFieldChanged() {
-    final c = _current;
-    if (c == null) return;
-    _current = c.copyWith(
+  void _syncFromFields() {
+    _current = (_current ?? const JovsAddress()).copyWith(
       street: _streetCtrl.text.trim().isEmpty ? null : _streetCtrl.text.trim(),
+      landmark: _landmarkCtrl.text.trim().isEmpty
+          ? null
+          : _landmarkCtrl.text.trim(),
+      country: _countryCtrl.text.trim().isEmpty ? null : _countryCtrl.text.trim(),
+      province: _stateCtrl.text.trim().isEmpty ? null : _stateCtrl.text.trim(),
       city: _cityCtrl.text.trim().isEmpty ? null : _cityCtrl.text.trim(),
-      // neighborhood : préservé tel qu'il vient du reverse geocode (si
-      // Nominatim l'a rendu), mais plus modifiable par l'utilisateur.
-      landmark: _landmarkCtrl.text.trim().isEmpty ? null : _landmarkCtrl.text.trim(),
     );
     _emit();
   }
 
-  Future<void> _movePinAndReverse(LatLng p) async {
+  Future<void> _applyReverse(JovsAddress reverse) async {
+    // Fallback intelligent pour le champ "Adresse" dans les pays sans
+    // adressage formel (Cameroun, parts d'Afrique) : Nominatim retourne
+    // rarement un `road` mais presque toujours un `suburb`/`neighbourhood`.
+    final streetLike = reverse.street ?? reverse.neighborhood ?? '';
     setState(() {
-      _pin = p;
-      _loadingReverse = true;
-    });
-    _mapController.move(p, _mapController.camera.zoom);
-    final result = await _nominatim.reverse(p, acceptLanguage: _acceptLanguage);
-    if (!mounted) return;
-    setState(() {
-      _loadingReverse = false;
-      if (result != null) {
-        // Preserve user-edited landmark across reverse lookups.
-        final preservedLandmark = _landmarkCtrl.text.trim().isEmpty
-            ? null
-            : _landmarkCtrl.text.trim();
-        _current = result.copyWith(landmark: preservedLandmark);
-        // Fallback intelligent pour le champ "Adresse / Rue / Quartier" :
-        // dans les pays sans adressage formel (Cameroun, parts d'Afrique),
-        // Nominatim retourne rarement un `road` mais presque toujours un
-        // `suburb`/`neighbourhood`. On remonte ce dernier dans le champ
-        // principal pour que l'utilisateur voie "Bastos" plutôt que vide.
-        _streetCtrl.text = result.street ?? result.neighborhood ?? '';
-        _cityCtrl.text = result.city ?? '';
-      } else {
-        // Keep the pin but let the user fill the form manually.
-        _current = (_current ??
-                JovsAddress(latitude: p.latitude, longitude: p.longitude))
-            .copyWith(latitude: p.latitude, longitude: p.longitude);
-      }
+      _streetCtrl.text = streetLike;
+      _countryCtrl.text = reverse.country ?? _countryCtrl.text;
+      _stateCtrl.text = reverse.province ?? _stateCtrl.text;
+      _cityCtrl.text = reverse.city ?? _cityCtrl.text;
+      // Préserve landmark édité par l'utilisateur.
+      final preservedLandmark = _landmarkCtrl.text.trim().isEmpty
+          ? null
+          : _landmarkCtrl.text.trim();
+      _current = reverse.copyWith(landmark: preservedLandmark);
     });
     _emit();
   }
 
   Future<void> _tryUseCurrentLocation({bool silent = false}) async {
+    setState(() => _loadingGps = true);
     try {
       final serviceOn = await Geolocator.isLocationServiceEnabled();
       if (!serviceOn) {
@@ -235,9 +259,27 @@ class _JovsAddressPickerState extends State<JovsAddressPicker> {
       final pos = await Geolocator.getCurrentPosition(
         desiredAccuracy: LocationAccuracy.high,
       );
-      await _movePinAndReverse(LatLng(pos.latitude, pos.longitude));
+      final reverse = await _nominatim.reverse(
+        LatLng(pos.latitude, pos.longitude),
+        acceptLanguage: _acceptLanguage,
+      );
+      if (!mounted) return;
+      if (reverse != null) {
+        await _applyReverse(reverse);
+      } else {
+        // Reverse a échoué mais on garde quand même le lat/lng.
+        setState(() {
+          _current = (_current ?? const JovsAddress()).copyWith(
+            latitude: pos.latitude,
+            longitude: pos.longitude,
+          );
+        });
+        _emit();
+      }
     } catch (_) {
       if (!silent) _snack('address_picker.permission_denied'.tr());
+    } finally {
+      if (mounted) setState(() => _loadingGps = false);
     }
   }
 
@@ -259,15 +301,11 @@ class _JovsAddressPickerState extends State<JovsAddressPicker> {
       final results = await _nominatim.search(
         text,
         acceptLanguage: _acceptLanguage,
-        countryCode: widget.biasCountry,
+        countryCode: _activeCountryCode,
       );
       if (!mounted) return;
       setState(() {
         _suggestions = results;
-        // Flag : la recherche a rendu zéro résultat. Permet d'afficher
-        // "aucune adresse trouvée" au lieu de laisser le pin filer sur la
-        // carte sans aucun feedback (incident 2026-11-06, Lévis mal
-        // reconnu → l'utilisateur pense que Nominatim a validé Montréal).
         _searchReturnedEmpty = results.isEmpty;
       });
     });
@@ -279,7 +317,22 @@ class _JovsAddressPickerState extends State<JovsAddressPicker> {
       _suggestions = const [];
       _searchReturnedEmpty = false;
     });
-    await _movePinAndReverse(p.latLng);
+    final reverse = await _nominatim.reverse(
+      p.latLng,
+      acceptLanguage: _acceptLanguage,
+    );
+    if (!mounted) return;
+    if (reverse != null) {
+      await _applyReverse(reverse);
+    } else {
+      setState(() {
+        _current = (_current ?? const JovsAddress()).copyWith(
+          latitude: p.latLng.latitude,
+          longitude: p.latLng.longitude,
+        );
+      });
+      _emit();
+    }
   }
 
   @override
@@ -290,11 +343,15 @@ class _JovsAddressPickerState extends State<JovsAddressPicker> {
       children: [
         _buildSearchBar(theme),
         const SizedBox(height: 8),
-        SizedBox(height: widget.height, child: _buildMap(theme)),
-        const SizedBox(height: 12),
-        _buildFieldsCard(theme),
+        _buildGpsButton(theme),
+        const SizedBox(height: 16),
+        _buildCountryCityCard(theme),
+        const SizedBox(height: 14),
+        _buildStreetField(theme),
+        const SizedBox(height: 14),
+        _buildLandmarkField(theme),
         if (widget.showConfirmButton) ...[
-          const SizedBox(height: 12),
+          const SizedBox(height: 20),
           _buildConfirmButton(theme),
         ],
       ],
@@ -302,10 +359,6 @@ class _JovsAddressPickerState extends State<JovsAddressPicker> {
   }
 
   Widget _buildSearchBar(ThemeData theme) {
-    // Rendu en Column : les suggestions se placent SOUS le champ et
-    // poussent le reste vers le bas. Dans un Stack avec Positioned,
-    // elles sortaient de la zone de hit testing et devenaient
-    // inaccessibles au tap (incident 2026-11-06).
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -363,143 +416,116 @@ class _JovsAddressPickerState extends State<JovsAddressPicker> {
     );
   }
 
-  Widget _buildMap(ThemeData theme) {
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(12),
-      child: Stack(
-        children: [
-          FlutterMap(
-            mapController: _mapController,
-            options: MapOptions(
-              initialCenter: _pin,
-              initialZoom: 13,
-              onTap: (_, point) => _movePinAndReverse(point),
-            ),
-            children: [
-              TileLayer(
-                urlTemplate: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
-                subdomains: const ['a', 'b', 'c'],
-                userAgentPackageName: 'ca.jovs.app',
-              ),
-              MarkerLayer(
-                markers: [
-                  Marker(
-                    point: _pin,
-                    width: 42,
-                    height: 42,
-                    alignment: Alignment.topCenter,
-                    child: const Icon(Icons.location_pin,
-                        size: 42, color: Color(0xFFFC9501)),
-                  ),
-                ],
-              ),
-            ],
-          ),
-          if (_loadingReverse)
-            const Positioned(
-              top: 12,
-              right: 12,
-              child: SizedBox(
-                width: 20,
-                height: 20,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              ),
-            ),
-          Positioned(
-            bottom: 12,
-            left: 12,
-            child: ElevatedButton.icon(
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.white,
-                foregroundColor: Colors.black87,
-                elevation: 2,
-                shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(24)),
-              ),
-              onPressed: () => _tryUseCurrentLocation(),
-              icon: const Icon(Icons.my_location, size: 18),
-              label: Text('address_picker.use_my_location'.tr()),
-            ),
-          ),
-          Positioned(
-            bottom: 4,
-            right: 8,
-            child: Text(
-              'address_picker.osm_attribution'.tr(),
-              style: const TextStyle(fontSize: 10, color: Colors.black54),
-            ),
-          ),
-        ],
+  Widget _buildGpsButton(ThemeData theme) {
+    return OutlinedButton.icon(
+      onPressed: _loadingGps ? null : () => _tryUseCurrentLocation(),
+      icon: _loadingGps
+          ? const SizedBox(
+              width: 16,
+              height: 16,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
+          : const Icon(Icons.my_location, size: 18),
+      label: Text('address_picker.use_my_location'.tr()),
+      style: OutlinedButton.styleFrom(
+        minimumSize: const Size.fromHeight(44),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       ),
     );
   }
 
-  Widget _buildFieldsCard(ThemeData theme) {
-    final country = _current?.country;
+  Widget _buildCountryCityCard(ThemeData theme) {
+    // Le picker du package gère lui-même son dialog de sélection avec
+    // search intégrée. On lui donne les 3 TextEditingController ; ses
+    // onCountryChanged/onStateChanged/onCityChanged nous rendent les
+    // sélections et on les pousse dans _current via _syncFromFields.
     return Container(
-      padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
         color: theme.colorScheme.surface,
         borderRadius: BorderRadius.circular(12),
         border: Border.all(color: theme.dividerColor),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Row(
-            children: [
-              const Icon(Icons.flag_outlined, size: 18, color: Colors.black45),
-              const SizedBox(width: 8),
-              Text(
-                '${'address_picker.country'.tr()}: ${country ?? "—"}',
-                style: const TextStyle(color: Colors.black87),
-              ),
-            ],
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      child: CustomCountryStateCityPicker(
+        country: _countryCtrl,
+        state: _stateCtrl,
+        city: _cityCtrl,
+        locale: _acceptLanguage.startsWith('fr') ? 'fr' : 'en',
+        spacing: 8,
+        textFieldDecoration: InputDecoration(
+          isDense: true,
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(10),
           ),
-          const SizedBox(height: 10),
-          TextField(
-            controller: _streetCtrl,
-            onChanged: (_) => _onFieldChanged(),
-            decoration: InputDecoration(
-              labelText: _streetLabel,
-              hintText: _streetHint,
-              isDense: true,
-              border: const OutlineInputBorder(),
+        ),
+        fieldHintText: FieldHintText(
+          countryHintText: 'address_picker.country'.tr(),
+          stateHintText: 'address_picker.state'.tr(),
+          cityHintText: 'address_picker.city'.tr(),
+        ),
+        dialogTitle: DialogTitle(
+          countryDialogTitle: 'address_picker.country'.tr(),
+          stateDialogTitle: 'address_picker.state'.tr(),
+          cityDialogTitle: 'address_picker.city'.tr(),
+        ),
+        onCountryChanged: (c) {
+          _current = (_current ?? const JovsAddress()).copyWith(
+            countryCode: c.sortName,
+            country: c.name,
+          );
+          _syncFromFields();
+        },
+        onStateChanged: (_) => _syncFromFields(),
+        onCityChanged: (_) => _syncFromFields(),
+      ),
+    );
+  }
+
+  Widget _buildStreetField(ThemeData theme) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        TextField(
+          controller: _streetCtrl,
+          onChanged: (_) => _syncFromFields(),
+          decoration: InputDecoration(
+            labelText: _streetLabel,
+            hintText: _streetHint,
+            isDense: true,
+            border: const OutlineInputBorder(),
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.only(top: 4, left: 4),
+          child: Text(
+            'address_picker.manual_hint'.tr(),
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: theme.colorScheme.onSurface.withOpacity(0.55),
+              fontSize: 11,
             ),
           ),
-          const SizedBox(height: 8),
-          TextField(
-            controller: _cityCtrl,
-            onChanged: (_) => _onFieldChanged(),
-            decoration: InputDecoration(
-              labelText: 'address_picker.city'.tr(),
-              isDense: true,
-              border: const OutlineInputBorder(),
-            ),
-          ),
-          // "Quartier" retiré : au Canada on n'utilise jamais ce terme,
-          // au Cameroun le quartier se met directement dans "Adresse ou
-          // lieu-dit" (ex: Bastos, Carrefour Yassa). Le backend garde le
-          // champ neighborhood nullable — s'il arrive par reverse, on le
-          // conserve dans _current mais on ne le demande pas au user.
-          const SizedBox(height: 8),
-          TextField(
-            controller: _landmarkCtrl,
-            onChanged: (_) => _onFieldChanged(),
-            maxLines: 2,
-            decoration: InputDecoration(
-              labelText: 'address_picker.landmark'.tr(),
-              hintText: 'address_picker.landmark_hint'.tr(),
-              isDense: true,
-              border: const OutlineInputBorder(),
-            ),
-          ),
-        ],
+        ),
+      ],
+    );
+  }
+
+  Widget _buildLandmarkField(ThemeData theme) {
+    return TextField(
+      controller: _landmarkCtrl,
+      onChanged: (_) => _syncFromFields(),
+      maxLines: 2,
+      decoration: InputDecoration(
+        labelText: 'address_picker.landmark'.tr(),
+        hintText: 'address_picker.landmark_hint'.tr(),
+        isDense: true,
+        border: const OutlineInputBorder(),
       ),
     );
   }
 
   Widget _buildConfirmButton(ThemeData theme) {
+    final canConfirm = (_cityCtrl.text.trim().isNotEmpty) &&
+        (_countryCtrl.text.trim().isNotEmpty);
     return SizedBox(
       width: double.infinity,
       height: 48,
@@ -508,9 +534,9 @@ class _JovsAddressPickerState extends State<JovsAddressPicker> {
           backgroundColor: const Color(0xFFFC9501),
           foregroundColor: Colors.white,
         ),
-        onPressed: _current == null
-            ? null
-            : () => widget.onConfirm?.call(_current!),
+        onPressed: canConfirm && _current != null
+            ? () => widget.onConfirm?.call(_current!)
+            : null,
         child: Text('address_picker.confirm'.tr()),
       ),
     );

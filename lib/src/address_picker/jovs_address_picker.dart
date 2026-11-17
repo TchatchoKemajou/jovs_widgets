@@ -468,6 +468,8 @@ class _JovsAddressPickerState extends State<JovsAddressPicker> {
           stateDialogTitle: 'address_picker.state'.tr(),
           cityDialogTitle: 'address_picker.city'.tr(),
         ),
+        inputSearchHintText: 'address_picker.search_in_list'.tr(),
+        closeTextButton: 'address_picker.close'.tr(),
         onCountryChanged: (c) {
           _current = (_current ?? const JovsAddress()).copyWith(
             countryCode: c.sortName,
